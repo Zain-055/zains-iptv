@@ -1,0 +1,132 @@
+name: Build desktop and iOS apps
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable Windows Developer Mode
+        shell: pwsh
+        run: |
+          New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Force | Out-Null
+          New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 -Force | Out-Null
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.5
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build windows --release
+      - name: Package Windows release
+        shell: pwsh
+        run: |
+          $releaseDirectory = 'build/windows/x64/runner/Release'
+          $executable = Get-ChildItem $releaseDirectory -Filter '*.exe' | Select-Object -First 1
+          if (-not $executable) {
+            throw "No Windows executable was found in $releaseDirectory"
+          }
+          Copy-Item $executable.FullName 'zains-iptv-windows-x64.exe'
+          Compress-Archive -Path "$releaseDirectory/*" -DestinationPath 'zains-iptv-windows-x64.zip'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zains-iptv-windows-x64
+          path: |
+            zains-iptv-windows-x64.exe
+            zains-iptv-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.5
+          channel: stable
+          cache: true
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+      - run: flutter pub get
+      - run: flutter build linux --release
+      - name: Package Linux release
+        run: tar -czf zains-iptv-linux-x64.tar.gz -C build/linux/x64/release bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zains-iptv-linux-x64
+          path: zains-iptv-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.5
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build macos --release
+      - name: Package macOS app
+        run: |
+          app_path="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app_path"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" zains-iptv-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zains-iptv-macos
+          path: zains-iptv-macos.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.5
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build ios --release --no-codesign
+      - name: Package unsigned iOS app
+        run: ditto -c -k --sequesterRsrc --keepParent build/ios/iphoneos/Runner.app zains-iptv-ios-unsigned.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zains-iptv-ios-unsigned
+          path: zains-iptv-ios-unsigned.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zains-iptv-windows-x64
+          path: release-assets
+      - name: Publish Windows release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/zains-iptv-windows-x64.exe \
+            release-assets/zains-iptv-windows-x64.zip \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
