@@ -11,6 +11,8 @@ ZAIN'S IPTV is a Flutter-based IPTV player for loading and browsing M3U/M3U8 pla
 - Tune directly to numbered channels with the number keys on a TV remote
 - Offline fallback to the last cached playlist
 - TV-friendly layout with large touch targets and focusable controls
+- Cross-platform live playback for HLS/M3U8 and other common stream formats, including Windows
+- Broader device codec support through the bundled media playback engine
 - Channel numbers follow playlist order and work regardless of the active category or search filter
 - Fixed orange-on-black theme
 - Keeps unavailable streams in the channel list so playback can retry automatically
@@ -30,6 +32,12 @@ Stream availability is checked during playback rather than playlist import. A fa
    ```
 
 3. On first launch, load a valid IPTV playlist to begin using the app.
+
+## Downloads
+
+GitHub Releases provide the signed Android APK and the Windows x64 executable. Download the Windows ZIP for the complete runnable app bundle; the standalone executable depends on the runtime files in that ZIP.
+
+The Android APK is signed with the project's existing release key. Install it over an existing copy to upgrade while preserving app data.
 
 ## Testing
 

@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
-import 'package:video_player/video_player.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 
 import '../models/channel.dart';
 
@@ -13,8 +14,11 @@ class PlayerProvider extends ChangeNotifier {
   static const _stablePlaybackDuration = Duration(seconds: 60);
   static const _retryBaseDelaySeconds = 5;
   static const _retryMaxDelaySeconds = 60;
+  static const _initializationTimeout = Duration(seconds: 30);
 
-  VideoPlayerController? _controller;
+  Player? _player;
+  VideoController? _videoController;
+  final List<StreamSubscription<dynamic>> _playerSubscriptions = [];
   Channel? _currentChannel;
   bool _isInitializing = false;
   bool _isPlaying = false;
@@ -31,7 +35,7 @@ class PlayerProvider extends ChangeNotifier {
   int _retryAttempt = 0;
   AspectRatioMode _aspectRatioMode = AspectRatioMode.fit;
 
-  VideoPlayerController? get controller => _controller;
+  VideoController? get videoController => _videoController;
   Channel? get currentChannel => _currentChannel;
   bool get isInitializing => _isInitializing;
   bool get isPlaying => _isPlaying;
@@ -39,8 +43,18 @@ class PlayerProvider extends ChangeNotifier {
   bool get hasError => _hasError;
   bool get showOverlay => _showOverlay;
   AspectRatioMode get aspectRatioMode => _aspectRatioMode;
+  double get videoAspectRatio {
+    final state = _player?.state;
+    final width = state?.width;
+    final height = state?.height;
+    if (width == null || height == null || width <= 0 || height <= 0) {
+      return 16 / 9;
+    }
+    return width / height;
+  }
 
   Future<void> playChannel(Channel channel, {bool autoPlay = true}) async {
+    if (_isDisposed) return;
     final generation = ++_playbackGeneration;
     if (_currentChannel?.id != channel.id) {
       _retryAttempt = 0;
@@ -50,121 +64,156 @@ class PlayerProvider extends ChangeNotifier {
     _retryTimer = null;
     _cancelBufferingTimers();
 
-    final previousController = _controller;
-    _controller = null;
-    if (previousController != null) {
-      previousController.removeListener(_onControllerUpdate);
-      await previousController.dispose();
-    }
+    await _disposePlaybackResources();
     if (_isDisposed || generation != _playbackGeneration) return;
 
     _currentChannel = channel;
     _isInitializing = true;
     _hasError = false;
-    _isBuffering = false;
+    _isBuffering = true;
     _showOverlay = true;
     notifyListeners();
 
     _startOverlayTimer();
 
     try {
-      final uri = Uri.parse(channel.url.trim());
-      final controller = VideoPlayerController.networkUrl(
-        uri,
-        httpHeaders: const {
-          'User-Agent': 'ZainsIPTV/1.0 (Android/TV)',
-          'Accept': '*/*',
-        },
-      );
-      _controller = controller;
-      controller.addListener(_onControllerUpdate);
+      final player = Player();
+      final videoController = VideoController(player);
+      _player = player;
+      _videoController = videoController;
+      _listenToPlayer(player, generation);
 
-      await controller.initialize().timeout(const Duration(seconds: 20));
+      await player
+          .open(
+            Media(
+              channel.url.trim(),
+              httpHeaders: const {
+                'User-Agent': 'ZainsIPTV/1.0',
+                'Accept': '*/*',
+              },
+            ),
+            play: autoPlay,
+          )
+          .timeout(_initializationTimeout);
       if (_isDisposed ||
           generation != _playbackGeneration ||
-          !identical(_controller, controller)) {
+          !identical(_player, player)) {
         return;
       }
 
       if (autoPlay) {
-        await controller.play();
+        await videoController.waitUntilFirstFrameRendered.timeout(
+          _initializationTimeout,
+        );
       }
 
       if (_isDisposed ||
           generation != _playbackGeneration ||
-          !identical(_controller, controller)) {
+          !identical(_player, player)) {
         return;
       }
+      if (_hasError) return;
       _retryTimer?.cancel();
       _retryTimer = null;
+      _bufferingTimer?.cancel();
+      _bufferingTimer = null;
       _isInitializing = false;
-      _hasError = controller.value.hasError;
-      _isPlaying = controller.value.isPlaying;
-      _isBuffering = controller.value.isBuffering;
+      _isPlaying = player.state.playing;
+      _isBuffering = player.state.buffering;
       if (_isBuffering) {
-        _startBufferingTimer(generation, controller);
+        _startBufferingTimer(generation);
       } else {
-        _updateStablePlaybackTimer(generation, controller);
-      }
-      if (_hasError) {
-        _scheduleRetry(generation);
+        _updateStablePlaybackTimer(generation);
       }
       notifyListeners();
     } catch (error, stackTrace) {
       if (_isDisposed || generation != _playbackGeneration) return;
-      FlutterError.reportError(
-        FlutterErrorDetails(
-          exception: error,
-          stack: stackTrace,
-          library: 'video player',
-        ),
+      _handlePlaybackError(error, stackTrace, generation);
+    }
+  }
+
+  void _listenToPlayer(Player player, int generation) {
+    _playerSubscriptions
+      ..add(
+        player.stream.playing.listen((isPlaying) {
+          if (!_isCurrentPlayer(player, generation)) return;
+          if (_isPlaying != isPlaying) {
+            _isPlaying = isPlaying;
+            if (isPlaying) {
+              _updateStablePlaybackTimer(generation);
+            } else {
+              _stablePlaybackTimer?.cancel();
+              _stablePlaybackTimer = null;
+            }
+            notifyListeners();
+          }
+        }),
+      )
+      ..add(
+        player.stream.buffering.listen((isBuffering) {
+          if (!_isCurrentPlayer(player, generation)) return;
+          if (_isBuffering == isBuffering) return;
+          _isBuffering = isBuffering;
+          if (isBuffering) {
+            _startBufferingTimer(generation);
+          } else {
+            _bufferingTimer?.cancel();
+            _bufferingTimer = null;
+            _updateStablePlaybackTimer(generation);
+          }
+          notifyListeners();
+        }),
+      )
+      ..add(
+        player.stream.error.listen((message) {
+          if (!_isCurrentPlayer(player, generation)) return;
+          _handlePlaybackError(
+            StateError(message),
+            StackTrace.current,
+            generation,
+          );
+        }),
+      )
+      ..add(
+        player.stream.width.listen((_) {
+          if (_isCurrentPlayer(player, generation)) notifyListeners();
+        }),
+      )
+      ..add(
+        player.stream.height.listen((_) {
+          if (_isCurrentPlayer(player, generation)) notifyListeners();
+        }),
       );
-      _isInitializing = false;
-      _hasError = true;
-      _isPlaying = false;
-      _isBuffering = false;
-      _scheduleRetry(generation);
-      notifyListeners();
-    }
   }
 
-  void _onControllerUpdate() {
-    final controller = _controller;
-    if (controller == null) return;
+  bool _isCurrentPlayer(Player player, int generation) =>
+      !_isDisposed &&
+      generation == _playbackGeneration &&
+      identical(_player, player);
 
-    final val = controller.value;
-    final isNowPlaying = val.isPlaying;
-    final isNowBuffering = val.isBuffering;
-    final hasControllerError = val.hasError;
-
-    if (hasControllerError) {
-      if (_hasError) return;
-      _cancelBufferingTimers();
-      _hasError = true;
-      _isInitializing = false;
-      _isPlaying = false;
-      _isBuffering = false;
-      _scheduleRetry(_playbackGeneration);
-      notifyListeners();
-      return;
-    }
-
-    if (isNowBuffering) {
-      _startBufferingTimer(_playbackGeneration, controller);
-    } else {
-      _bufferingTimer?.cancel();
-      _bufferingTimer = null;
-      _updateStablePlaybackTimer(_playbackGeneration, controller);
-    }
-
-    if (_isPlaying != isNowPlaying || _isBuffering != isNowBuffering) {
-      _isPlaying = isNowPlaying;
-      _isBuffering = isNowBuffering;
-      notifyListeners();
-    }
+  void _handlePlaybackError(
+    Object error,
+    StackTrace stackTrace,
+    int generation,
+  ) {
+    if (_isDisposed || generation != _playbackGeneration || _hasError) return;
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: error,
+        stack: stackTrace,
+        library: 'media player',
+      ),
+    );
+    _cancelBufferingTimers();
+    _isInitializing = false;
+    _hasError = true;
+    _isPlaying = false;
+    _isBuffering = false;
+    _scheduleRetry(generation);
+    notifyListeners();
   }
 
-  void _startBufferingTimer(int generation, VideoPlayerController controller) {
+  void _startBufferingTimer(int generation) {
     _stablePlaybackTimer?.cancel();
     _stablePlaybackTimer = null;
     if (_bufferingTimer != null) return;
@@ -173,25 +222,21 @@ class PlayerProvider extends ChangeNotifier {
       _bufferingTimer = null;
       if (_isDisposed ||
           generation != _playbackGeneration ||
-          !identical(_controller, controller) ||
-          !controller.value.isBuffering) {
+          _player?.state.buffering != true) {
         return;
       }
 
-      _hasError = true;
-      _isInitializing = false;
-      _isPlaying = false;
-      _isBuffering = false;
-      _scheduleRetry(generation);
-      notifyListeners();
+      _handlePlaybackError(
+        TimeoutException('The live stream remained buffered too long.'),
+        StackTrace.current,
+        generation,
+      );
     });
   }
 
-  void _updateStablePlaybackTimer(
-    int generation,
-    VideoPlayerController controller,
-  ) {
-    if (!controller.value.isPlaying) {
+  void _updateStablePlaybackTimer(int generation) {
+    final player = _player;
+    if (player == null || !player.state.playing || player.state.buffering) {
       _stablePlaybackTimer?.cancel();
       _stablePlaybackTimer = null;
       return;
@@ -202,9 +247,9 @@ class PlayerProvider extends ChangeNotifier {
       _stablePlaybackTimer = null;
       if (_isDisposed ||
           generation != _playbackGeneration ||
-          !identical(_controller, controller) ||
-          !controller.value.isPlaying ||
-          controller.value.isBuffering) {
+          !identical(_player, player) ||
+          !player.state.playing ||
+          player.state.buffering) {
         return;
       }
       _retryAttempt = 0;
@@ -219,14 +264,11 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   Future<void> togglePlayPause() async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
+    final player = _player;
+    if (player == null || _isInitializing) return;
 
-    if (_controller!.value.isPlaying) {
-      await _controller!.pause();
-    } else {
-      await _controller!.play();
-    }
-    _isPlaying = _controller!.value.isPlaying;
+    await player.playOrPause();
+    _isPlaying = player.state.playing;
     resetOverlayTimer();
     notifyListeners();
   }
@@ -297,21 +339,32 @@ class PlayerProvider extends ChangeNotifier {
   }
 
   Future<void> disposeCurrentPlayer() async {
+    if (_isDisposed) return;
     ++_playbackGeneration;
     _retryTimer?.cancel();
     _retryTimer = null;
     _cancelBufferingTimers();
     _overlayTimer?.cancel();
-    final controller = _controller;
-    _controller = null;
-    if (controller != null) {
-      controller.removeListener(_onControllerUpdate);
-      await controller.dispose();
-    }
+    await _disposePlaybackResources();
     _isPlaying = false;
     _isBuffering = false;
     _isInitializing = false;
     _hasError = false;
+    notifyListeners();
+  }
+
+  Future<void> _disposePlaybackResources() async {
+    final player = _player;
+    _player = null;
+    _videoController = null;
+    final subscriptions = List<StreamSubscription<dynamic>>.of(
+      _playerSubscriptions,
+    );
+    _playerSubscriptions.clear();
+    await Future.wait(
+      subscriptions.map((subscription) => subscription.cancel()),
+    );
+    await player?.dispose();
   }
 
   @override
@@ -321,8 +374,20 @@ class PlayerProvider extends ChangeNotifier {
     _retryTimer?.cancel();
     _cancelBufferingTimers();
     _overlayTimer?.cancel();
-    _controller?.removeListener(_onControllerUpdate);
-    _controller?.dispose();
+    unawaited(
+      _disposePlaybackResources().catchError((
+        Object error,
+        StackTrace stackTrace,
+      ) {
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            stack: stackTrace,
+            library: 'media player cleanup',
+          ),
+        );
+      }),
+    );
     super.dispose();
   }
 }

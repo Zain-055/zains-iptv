@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:provider/provider.dart';
 
 import 'providers/player_provider.dart';
@@ -11,6 +12,7 @@ import 'theme/app_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
 
   final storageService = await StorageService.init();
   final playlistService = PlaylistService(storageService);
@@ -24,9 +26,7 @@ void main() async {
         ChangeNotifierProvider<PlaylistProvider>(
           create: (_) => PlaylistProvider(playlistService, storageService),
         ),
-        ChangeNotifierProvider<PlayerProvider>(
-          create: (_) => PlayerProvider(),
-        ),
+        ChangeNotifierProvider<PlayerProvider>(create: (_) => PlayerProvider()),
       ],
       child: const ZainIPTVApp(),
     ),

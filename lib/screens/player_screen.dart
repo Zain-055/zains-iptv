@@ -2,8 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import 'package:provider/provider.dart';
-import 'package:video_player/video_player.dart';
 
 import '../models/channel.dart';
 import '../providers/player_provider.dart';
@@ -81,7 +81,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
         playlistProvider.selectedChannel ??
         widget.channel;
     var channels = playlistProvider.filteredChannels;
-    if (channels.isEmpty || !channels.any((channel) => channel.id == current.id)) {
+    if (channels.isEmpty ||
+        !channels.any((channel) => channel.id == current.id)) {
       channels = playlistProvider.playlist?.channels ?? [];
     }
 
@@ -89,9 +90,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (channels.isNotEmpty) {
       final newIndex =
           (currentIndex < 0
-                  ? (direction > 0 ? 0 : channels.length - 1)
-                  : currentIndex + direction) %
-              channels.length;
+              ? (direction > 0 ? 0 : channels.length - 1)
+              : currentIndex + direction) %
+          channels.length;
       final nextChannel = channels[newIndex];
       playlistProvider.selectChannel(nextChannel);
       _initPlayer(nextChannel);
@@ -197,6 +198,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final playlistProvider = Provider.of<PlaylistProvider>(context);
     final currentChannel = playerProvider.currentChannel ?? widget.channel;
     final isFav = playlistProvider.isFavorite(currentChannel);
+    final videoFit = switch (playerProvider.aspectRatioMode) {
+      AspectRatioMode.fit => BoxFit.contain,
+      AspectRatioMode.fill => BoxFit.cover,
+      AspectRatioMode.stretch => BoxFit.fill,
+    };
     return Scaffold(
       backgroundColor: Colors.black,
       body: KeyboardListener(
@@ -265,19 +271,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   ),
                 ),
               // Video View
-              if (playerProvider.controller != null &&
-                  playerProvider.controller!.value.isInitialized &&
+              if (playerProvider.videoController != null &&
                   !playerProvider.hasError) ...[
                 Center(
-                  child: AspectRatio(
-                    aspectRatio:
-                        playerProvider.aspectRatioMode == AspectRatioMode.fit
-                        ? playerProvider.controller!.value.aspectRatio
-                        : playerProvider.aspectRatioMode == AspectRatioMode.fill
-                        ? (MediaQuery.of(context).size.width /
-                              MediaQuery.of(context).size.height)
-                        : 16 / 9,
-                    child: VideoPlayer(playerProvider.controller!),
+                  child: Video(
+                    controller: playerProvider.videoController!,
+                    fit: videoFit,
+                    aspectRatio: playerProvider.videoAspectRatio,
+                    controls: NoVideoControls,
                   ),
                 ),
               ],
@@ -361,7 +362,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                 ),
                                 child: const Row(
                                   children: [
-                                    Icon(Icons.skip_previous_rounded, color: Colors.white),
+                                    Icon(
+                                      Icons.skip_previous_rounded,
+                                      color: Colors.white,
+                                    ),
                                     SizedBox(width: 6),
                                     Text(
                                       'Previous',
@@ -392,7 +396,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                       ),
                                     ),
                                     SizedBox(width: 6),
-                                    Icon(Icons.skip_next_rounded, color: Colors.white),
+                                    Icon(
+                                      Icons.skip_next_rounded,
+                                      color: Colors.white,
+                                    ),
                                   ],
                                 ),
                               ),
